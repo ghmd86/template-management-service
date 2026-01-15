@@ -174,6 +174,145 @@ flowchart LR
 
 ---
 
+## 2b. Template Wizard - 6 Step Configuration Process
+
+The Template Wizard provides a guided 6-step process for creating document templates without requiring technical knowledge.
+
+```mermaid
+flowchart LR
+    S1[Step 1<br/>Basic Info] --> S2[Step 2<br/>Ownership]
+    S2 --> S3[Step 3<br/>Fields]
+    S3 --> S4[Step 4<br/>Source APIs]
+    S4 --> S5[Step 5<br/>Access Rules]
+    S5 --> S6[Step 6<br/>Review]
+
+    style S1 fill:#e8f5e9
+    style S2 fill:#e3f2fd
+    style S3 fill:#fff3e0
+    style S4 fill:#fce4ec
+    style S5 fill:#f3e5f5
+    style S6 fill:#e0f2f1
+```
+
+### Step 1: Basic Information
+| Field | Description | Options |
+|-------|-------------|---------|
+| Template Name | Display name for the template | Free text |
+| Description | Template purpose and usage | Free text |
+| Document Category | Type of document | Statement, Legal, Tax, Regulatory, Notice |
+| Line of Business | Business area | CREDIT_CARD, SAVINGS, MORTGAGE, etc. |
+
+### Step 2: Document Ownership
+| Type | Description | Use Case |
+|------|-------------|----------|
+| Account-specific | Document belongs to a specific account | Statements, notices |
+| Customer-wide | Document accessible to all accounts for a customer | Disclosures |
+| Shared/Public | Document available to multiple customers | Marketing materials |
+| Conditional | Access based on eligibility rules | Premium-tier documents |
+
+### Step 3: Extractable Fields
+- Pre-populated fields based on document category
+- Add custom fields as needed
+- Automatic field type detection (DATE, STRING, NUMBER, etc.)
+- Required/optional field configuration
+
+### Step 4: Source APIs
+Three ways to configure source APIs for eligibility checks:
+
+| Option | Description | When to Use |
+|--------|-------------|-------------|
+| **A: Existing API** | Select from pre-defined APIs (Credit Info, Account Info, Arrangements) | Common use cases |
+| **B: Upload API Spec** | Upload OpenAPI 3.0/Swagger 2.0 JSON specification | New integrations |
+| **C: Custom API** | Manually register new API with endpoint and fields | One-off integrations |
+
+### Step 5: Access Rules
+- Visual rule builder with dropdown selections
+- Plain language description option
+- Automatic field population from selected API
+- Example: `membershipTier IN ["PLATINUM", "GOLD"]`
+
+### Step 6: Review & Generate
+- Summary of all configurations
+- Generated JSON configuration
+- Downloadable SQL INSERT statement for `master_template_definition`
+
+---
+
+## 2c. Template Onboarding Process Flow
+
+The end-to-end onboarding process from business request to production deployment.
+
+```mermaid
+flowchart TB
+    subgraph Phase1["Phase 1: Request"]
+        A([Start]) --> B[Submit Template Request]
+        B --> C[Define Requirements]
+        C --> D[Provide Sample Document]
+    end
+
+    subgraph Phase2["Phase 2: Configuration"]
+        D --> E[Use Template Wizard]
+        E --> F[Define Access Rules]
+        F --> G[Generate Config/SQL]
+        G --> H{IT Review}
+        H -->|Issues| E
+        H -->|Approved| I[Insert to DEV DB]
+    end
+
+    subgraph Phase3["Phase 3: Technical Setup & UAT"]
+        I --> J[Configure Vendor Mapping]
+        J --> K[Run Integration Tests]
+        K --> L{Tests Pass?}
+        L -->|No| K
+        L -->|Yes| M[Load Test Data]
+        M --> N[Business UAT]
+        N --> O{UAT Approved?}
+        O -->|No| E
+        O -->|Yes| P[Create Migration Script]
+    end
+
+    subgraph Phase4["Phase 4: Deployment"]
+        P --> Q[Deploy to PROD]
+        Q --> R[Smoke Test]
+        R --> S[Go-Live Confirmation]
+        S --> T([End])
+    end
+
+    style Phase1 fill:#e8f5e9,stroke:#4caf50
+    style Phase2 fill:#e3f2fd,stroke:#2196f3
+    style Phase3 fill:#fff3e0,stroke:#ff9800
+    style Phase4 fill:#f3e5f5,stroke:#9c27b0
+```
+
+### Onboarding Timeline
+
+| Phase | Activities | Duration | Owner |
+|-------|------------|----------|-------|
+| **Phase 1: Request** | Submit request, define requirements, provide sample | 1-2 days | Business |
+| **Phase 2: Configuration** | Use wizard, IT review, insert to DEV | 1-2 days | Business + IT |
+| **Phase 3: Setup & UAT** | Vendor mapping, integration tests, UAT | 2-3 days | IT + Business |
+| **Phase 4: Deployment** | Migration script, PROD deploy, smoke test | 1 day | IT |
+
+**Total: ~6 days typical**
+
+### RACI Matrix
+
+| Activity | Business | IT | Management |
+|----------|----------|-----|------------|
+| Submit Request | R/A | I | I |
+| Define Requirements | R/A | C | I |
+| Use Template Wizard | R | C | I |
+| Review Configuration | C | R/A | I |
+| Deploy to DEV | I | R/A | I |
+| Run Tests | I | R/A | I |
+| UAT Testing | R/A | C | I |
+| Deploy to PROD | I | R/A | A |
+| Go-Live Confirmation | R | I | A |
+
+*R=Responsible, A=Accountable, C=Consulted, I=Informed*
+
+---
+
 ## 3. Template Lifecycle States
 
 ```mermaid
