@@ -7,8 +7,10 @@ This document illustrates how the Template Admin Portal interacts with the Templ
 **Approval Workflow**: The template approval process is managed by **Pega CaseWiz**, which provides case management, workflow orchestration, and audit trail capabilities.
 
 **Approval Impact**:
-- **Template**: Approval sets `activeFlag=true` (active) or `activeFlag=false` (inactive)
-- **Vendor Mappings**: Approval sets `vendor_mapping_status=APPROVED` or `vendor_mapping_status=REJECTED` for associated vendor mappings
+- **Template**: Approval sets `record_status=Approved` and `activeFlag=true`
+- **Vendor Mappings**: Approval sets `vendor_mapping_status=Approved` and `activeFlag=true`
+
+**Status Values**: `Draft`, `Pending`, `Approved`, `Archived`
 
 ---
 
@@ -114,36 +116,40 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> DRAFT: Create Template
+    [*] --> Draft: Create Template
 
-    DRAFT --> PENDING_APPROVAL: Submit for Review
-    DRAFT --> DRAFT: Save Draft
+    Draft --> Pending: Submit for Review
+    Draft --> Draft: Save Draft
 
-    PENDING_APPROVAL --> APPROVED: Approver Accepts
-    PENDING_APPROVAL --> REJECTED: Approver Rejects
-    PENDING_APPROVAL --> DRAFT: Withdraw
+    Pending --> Approved: Approver Accepts
+    Pending --> Draft: Approver Rejects / Withdraw
 
-    REJECTED --> DRAFT: Revise
+    Approved --> Approved: Update (creates new version)
+    Approved --> Archived: Archive
 
-    APPROVED --> ACTIVE: Activate
-    APPROVED --> APPROVED: Schedule Activation
+    Archived --> [*]
 
-    ACTIVE --> INACTIVE: Disable
-    ACTIVE --> ACTIVE: Update (creates new version)
-
-    INACTIVE --> ACTIVE: Re-enable
-    INACTIVE --> ARCHIVED: Archive
-
-    ARCHIVED --> [*]
-
-    note right of DRAFT
+    note right of Draft
         Template can be edited freely
         Vendor mappings can be added
+        activeFlag = false
     end note
 
-    note right of ACTIVE
+    note right of Pending
+        Awaiting approval in Pega CaseWiz
+        Cannot be edited
+    end note
+
+    note right of Approved
         Template is live and in use
+        activeFlag = true
         Updates create new versions
+    end note
+
+    note right of Archived
+        Template is decommissioned
+        activeFlag = false
+        Cannot be reactivated
     end note
 ```
 
@@ -172,7 +178,7 @@ sequenceDiagram
         Portal->>+TMS: POST /templates<br/>{templateType, lineOfBusiness, displayName, ...}
         TMS->>TMS: Validate request
         TMS->>TMS: Check templateType uniqueness
-        TMS->>+DB: INSERT master_template_definition<br/>(status=DRAFT, version=1)
+        TMS->>+DB: INSERT master_template_definition<br/>(record_status=Draft, version=1)
         DB-->>-TMS: Template created
         TMS-->>-Portal: 201 Created<br/>{masterTemplateId, templateVersion: 1}
         Portal->>Portal: Update UI with template ID
@@ -206,8 +212,8 @@ sequenceDiagram
     rect rgb(255, 255, 224)
         Note over Admin,TMS: Step 5: Submit for Approval
         Admin->>Portal: Click "Submit for Approval"
-        Portal->>+TMS: PATCH /templates/{id}/versions/1<br/>{recordStatus: "PENDING_APPROVAL"}
-        TMS->>+DB: UPDATE record_status
+        Portal->>+TMS: PATCH /templates/{id}/versions/1<br/>{recordStatus: "Pending"}
+        TMS->>+DB: UPDATE record_status='Pending'
         DB-->>-TMS: Updated
         TMS-->>-Portal: 200 OK
         Portal->>Admin: Template submitted for approval
@@ -242,7 +248,7 @@ sequenceDiagram
         Portal->>Portal: Track changes locally
     end
 
-    alt Update In-Place (DRAFT status)
+    alt Update In-Place (Draft status)
         rect rgb(240, 255, 240)
             Note over Portal,DB: Option A: Update Existing Version
             Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{displayName, templateConfig, ...}
@@ -250,12 +256,12 @@ sequenceDiagram
             DB-->>-TMS: Updated
             TMS-->>-Portal: 200 OK (same version)
         end
-    else Create New Version (ACTIVE status)
+    else Create New Version (Approved status)
         rect rgb(255, 240, 255)
             Note over Portal,DB: Option B: Create New Version
             Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>?createNewVersion=true<br/>{displayName, templateConfig, ...}
             TMS->>TMS: Get next version number
-            TMS->>+DB: INSERT new version (v+1)<br/>with status=DRAFT
+            TMS->>+DB: INSERT new version (v+1)<br/>with record_status=Draft
             DB-->>-TMS: New version created
             TMS-->>-Portal: 200 OK (new version number)
         end
@@ -337,9 +343,9 @@ sequenceDiagram
     end
 
     rect rgb(240, 255, 240)
-        Note over Portal,DB: Step 3: Disable Template
-        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{activeFlag: false, recordStatus: "INACTIVE"}
-        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false
+        Note over Portal,DB: Step 3: Archive Template
+        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{activeFlag: false, recordStatus: "Archived"}
+        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false, record_status='Archived'
         DB-->>-TMS: Updated
         TMS->>TMS: Invalidate cache
         TMS-->>-Portal: 200 OK
@@ -412,15 +418,15 @@ sequenceDiagram
     rect rgb(240, 248, 255)
         Note over Admin,Pega: Step 1: Submit for Approval (Create Case)
         Admin->>Portal: Click "Submit for Approval"
-        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "PENDING_APPROVAL"}
-        TMS->>+DB: UPDATE record_status
+        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Pending"}
+        TMS->>+DB: UPDATE record_status='Pending'
         DB-->>-TMS: Updated
         TMS-->>-Portal: 200 OK
 
         Portal->>+Pega: POST /cases<br/>{caseType: "TemplateApproval",<br/>templateId, version, requestor}
         Pega->>Pega: Create case & assign to approver pool
         Pega->>Pega: Start SLA timer
-        Pega-->>-Portal: {caseId: "CASE-12345", status: "PENDING"}
+        Pega-->>-Portal: {caseId: "CASE-12345", status: "Pending"}
     end
 
     rect rgb(255, 248, 240)
@@ -445,8 +451,8 @@ sequenceDiagram
 
     rect rgb(255, 240, 255)
         Note over Pega,DB: Step 4: Pega Updates Template Status
-        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "APPROVED", activeFlag: true,<br/>approvedBy: "approver@company.com"}
-        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=true, record_status='APPROVED'
+        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Approved", activeFlag: true,<br/>approvedBy: "approver@company.com"}
+        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=true, record_status='Approved'
         DB-->>-TMS: Template updated
         TMS->>TMS: Invalidate template cache
         TMS-->>-Pega: 200 OK
@@ -458,8 +464,8 @@ sequenceDiagram
         TMS-->>-Pega: List of vendor mappings
 
         loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "APPROVED", activeFlag: true}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='APPROVED', active_flag=true
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "Approved", activeFlag: true}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='Approved', active_flag=true
             DB-->>-TMS: Vendor updated
             TMS->>TMS: Invalidate vendor cache
             TMS-->>-Pega: 200 OK
@@ -468,7 +474,7 @@ sequenceDiagram
 
     rect rgb(240, 248, 255)
         Note over Pega,Admin: Step 6: Case Resolution & Notification
-        Pega->>Pega: Mark case as RESOLVED-APPROVED
+        Pega->>Pega: Mark case as Resolved-Approved
         Pega->>Pega: Record audit trail
         Pega->>Admin: Notification: "Template approved"
         Pega->>Portal: Webhook: Case completed
@@ -499,22 +505,22 @@ sequenceDiagram
     end
 
     rect rgb(255, 248, 240)
-        Note over Pega,DB: Update Template Status (Inactive)
-        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "REJECTED", activeFlag: false,<br/>rejectionReason: "Missing regulatory fields"}
-        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false, record_status='REJECTED'
+        Note over Pega,DB: Revert Template to Draft
+        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Draft", activeFlag: false,<br/>rejectionReason: "Missing regulatory fields"}
+        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false, record_status='Draft'
         DB-->>-TMS: Template updated
         TMS->>TMS: Invalidate template cache
         TMS-->>-Pega: 200 OK
     end
 
     rect rgb(255, 240, 255)
-        Note over Pega,DB: Update Vendor Mappings (Rejected)
+        Note over Pega,DB: Revert Vendor Mappings to Draft
         Pega->>+TMS: GET /templates/vendors?templateId={id}&templateVersion={v}
         TMS-->>-Pega: List of vendor mappings
 
         loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "REJECTED", activeFlag: false}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='REJECTED', active_flag=false
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "Draft", activeFlag: false}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='Draft', active_flag=false
             DB-->>-TMS: Vendor updated
             TMS-->>-Pega: 200 OK
         end
@@ -522,7 +528,7 @@ sequenceDiagram
 
     rect rgb(240, 255, 240)
         Note over Pega,Admin: Notify Admin of Rejection
-        Pega->>Pega: Mark case as RESOLVED-REJECTED
+        Pega->>Pega: Mark case as Resolved-Rejected
         Pega->>Pega: Store rejection reason in audit
         Pega->>Admin: Notification with rejection reason
     end
@@ -552,7 +558,7 @@ sequenceDiagram
 | `vendorMappings` | List | List of vendor mapping IDs to approve/reject |
 | `requestor` | String | Admin who submitted for approval |
 | `assignedTo` | String | Current approver (from pool) |
-| `status` | String | PENDING, IN_REVIEW, APPROVED, REJECTED |
+| `status` | String | Draft, Pending, Approved, Archived |
 | `slaDeadline` | DateTime | Auto-escalation deadline |
 | `comments` | List | Approval/rejection comments |
 | `auditTrail` | List | All actions with timestamps |
@@ -561,8 +567,9 @@ sequenceDiagram
 
 | Decision | Template Effect | Vendor Mapping Effect |
 |----------|-----------------|----------------------|
-| **APPROVE** | `activeFlag=true`, `recordStatus=APPROVED` | `activeFlag=true`, `vendor_mapping_status=APPROVED` |
-| **REJECT** | `activeFlag=false`, `recordStatus=REJECTED` | `activeFlag=false`, `vendor_mapping_status=REJECTED` |
+| **Approve** | `activeFlag=true`, `record_status=Approved` | `activeFlag=true`, `vendor_mapping_status=Approved` |
+| **Reject** | `activeFlag=false`, `record_status=Draft` | `activeFlag=false`, `vendor_mapping_status=Draft` |
+| **Archive** | `activeFlag=false`, `record_status=Archived` | `activeFlag=false`, `vendor_mapping_status=Archived` |
 
 ### Pega API Endpoints
 
@@ -592,27 +599,27 @@ GET /prweb/api/v1/cases/{caseId}
 POST /api/v1/webhooks/pega/case-update
 {
   "caseId": "CASE-12345",
-  "status": "RESOLVED-APPROVED",
+  "status": "Resolved-Approved",
   "templateId": "550e8400-e29b-41d4-a716-446655440000",
   "templateVersion": 1,
-  "decision": "APPROVED",
+  "decision": "Approved",
   "approvedBy": "approver@company.com",
   "approvedAt": "2024-01-15T14:30:00Z",
   "templateUpdate": {
     "activeFlag": true,
-    "recordStatus": "APPROVED"
+    "recordStatus": "Approved"
   },
   "vendorMappingsUpdated": [
     {
       "vendorId": "660e8400-e29b-41d4-a716-446655440001",
       "vendor": "SmartComm",
-      "vendorMappingStatus": "APPROVED",
+      "vendorMappingStatus": "Approved",
       "activeFlag": true
     },
     {
       "vendorId": "660e8400-e29b-41d4-a716-446655440002",
       "vendor": "LPS",
-      "vendorMappingStatus": "APPROVED",
+      "vendorMappingStatus": "Approved",
       "activeFlag": true
     }
   ]
@@ -627,20 +634,24 @@ POST /api/v1/webhooks/pega/case-update
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │   ┌─────────┐     ┌──────────┐     ┌───────────┐               │
-│   │  START  │────▶│ PENDING  │────▶│ IN_REVIEW │               │
+│   │  START  │────▶│ Pending  │────▶│ In Review │               │
 │   └─────────┘     └──────────┘     └───────────┘               │
 │                        │                 │                      │
 │                        │            ┌────┴────┐                 │
 │                        │            ▼         ▼                 │
 │                   [SLA Breach]  ┌────────┐ ┌──────────┐         │
-│                        │        │APPROVED│ │ REJECTED │         │
+│                        │        │Approved│ │ Rejected │         │
 │                        ▼        └────────┘ └──────────┘         │
 │                   ┌─────────┐       │           │               │
-│                   │ESCALATE │       │           │               │
+│                   │Escalate │       │     (→ Draft)             │
 │                   └─────────┘       ▼           ▼               │
 │                        │        ┌───────────────────┐           │
-│                        └───────▶│   RESOLVED        │           │
+│                        └───────▶│   Resolved        │           │
 │                                 └───────────────────┘           │
+│                                                                 │
+│  Status Flow:                                                   │
+│  • Approved → Template: record_status=Approved, activeFlag=true │
+│  • Rejected → Template: record_status=Draft, activeFlag=false   │
 │                                                                 │
 │  Assignment Rules:                                              │
 │  • Credit Card templates → CC Approval Team                     │
@@ -773,8 +784,8 @@ X-User-Id: admin@company.com
     "templateType": "MONTHLY_STATEMENT",
     "lineOfBusiness": "CREDIT_CARD",
     "displayName": "Monthly Credit Card Statement",
-    "activeFlag": true,
-    "recordStatus": "DRAFT",
+    "activeFlag": false,
+    "recordStatus": "Draft",
     "createdBy": "admin@company.com",
     "createdTimestamp": "2024-01-15T10:30:00"
   }
@@ -803,17 +814,17 @@ X-User-Id: admin@company.com
 }
 ```
 
-### Disable Template
+### Archive Template
 
 ```http
 PATCH /api/v1/templates/550e8400-e29b-41d4-a716-446655440000/versions/1
 Content-Type: application/json
-X-Correlation-Id: admin-disable-001
+X-Correlation-Id: admin-archive-001
 X-User-Id: admin@company.com
 
 {
   "activeFlag": false,
-  "recordStatus": "INACTIVE"
+  "recordStatus": "Archived"
 }
 ```
 
@@ -833,12 +844,12 @@ X-User-Id: admin@company.com
 │  [+ Create Template]    [Filter ▼]  [Search... 🔍]                      │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │ Type              │ LOB         │ Status  │ Version │ Actions   │   │
-│  ├───────────────────┼─────────────┼─────────┼─────────┼───────────┤   │
-│  │ MONTHLY_STATEMENT │ CREDIT_CARD │ 🟢 ACTIVE │ v3    │ [Edit][▼] │   │
-│  │ WELCOME_LETTER    │ CREDIT_CARD │ 🟢 ACTIVE │ v1    │ [Edit][▼] │   │
-│  │ RATE_CHANGE       │ CREDIT_CARD │ 🟡 DRAFT  │ v2    │ [Edit][▼] │   │
-│  │ CLOSURE_NOTICE    │ SAVINGS     │ 🔴 INACTIVE│ v1   │ [Edit][▼] │   │
+│  │ Type              │ LOB         │ Status    │ Version │ Actions   │   │
+│  ├───────────────────┼─────────────┼───────────┼─────────┼───────────┤   │
+│  │ MONTHLY_STATEMENT │ CREDIT_CARD │ 🟢 Approved│ v3     │ [Edit][▼] │   │
+│  │ WELCOME_LETTER    │ CREDIT_CARD │ 🟢 Approved│ v1     │ [Edit][▼] │   │
+│  │ RATE_CHANGE       │ CREDIT_CARD │ 🟡 Draft   │ v2     │ [Edit][▼] │   │
+│  │ CLOSURE_NOTICE    │ SAVINGS     │ 🔵 Pending │ v1     │ [Edit][▼] │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  Showing 1-4 of 4 templates                        [< 1 2 3 ... 10 >]   │
@@ -857,7 +868,7 @@ X-User-Id: admin@company.com
 │  │  Display Name:     [Monthly Credit Card Statement          ]     │   │
 │  │  Line of Business: [CREDIT_CARD ▼]                               │   │
 │  │  Category:         [STATEMENT ▼]                                 │   │
-│  │  Status:           🟢 ACTIVE                                     │   │
+│  │  Status:           🟢 Approved                                    │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─ Vendor Mappings ───────────────────────────────────────────────┐   │
