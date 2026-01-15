@@ -495,6 +495,292 @@ flowchart TB
 
 ---
 
+## 2e. Enhanced Template Wizard Flow (Recommended Design)
+
+This section outlines an improved design with auto-save, real-time validation, preview, and integrated testing capabilities.
+
+### Current vs Enhanced Flow Comparison
+
+| Aspect | Current Design | Enhanced Design |
+|--------|----------------|-----------------|
+| **Draft Persistence** | Client-side only (lost on browser close) | Auto-save to backend every step |
+| **Validation** | End of wizard only | Real-time validation at each step |
+| **Preview** | None | Live document preview before submit |
+| **Vendor Mapping** | Separate flow after template creation | Integrated in Step 4 |
+| **Testing** | Manual after approval | Dry-run before approval |
+| **Collaboration** | Single user | Multi-user with conflict resolution |
+
+### Enhanced Architecture
+
+```mermaid
+flowchart TB
+    subgraph Wizard["Enhanced Template Wizard"]
+        direction TB
+        W1[Step 1: Basic Info] -->|Auto-save| DB1[(Draft Store)]
+        W1 --> V1{Validate}
+        V1 -->|Valid| W2[Step 2: Ownership]
+        V1 -->|Invalid| W1
+
+        W2 -->|Auto-save| DB1
+        W2 --> W3[Step 3: Fields]
+
+        W3 -->|Auto-save| DB1
+        W3 --> W4[Step 4: APIs + Vendors]
+
+        W4 -->|"Real-time API validation"| API[External APIs]
+        W4 -->|Auto-save| DB1
+        W4 --> W5[Step 5: Access Rules]
+
+        W5 -->|"Test rules"| RuleEngine[Rule Engine]
+        W5 -->|Auto-save| DB1
+        W5 --> W6[Step 6: Preview & Test]
+
+        W6 -->|"Generate preview"| Preview[Document Preview]
+        W6 -->|"Dry-run test"| TestEnv[Test Environment]
+    end
+
+    subgraph Actions["User Actions"]
+        Save[Save as Draft]
+        Submit[Submit for Approval]
+        Test[Run Test]
+    end
+
+    W6 --> Save
+    W6 --> Submit
+    W6 --> Test
+
+    style Wizard fill:#e8f5e9
+    style Actions fill:#fff3e0
+```
+
+### Enhanced Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Resource Creator
+    participant Wizard as Template Wizard
+    participant BFF as BFF
+    participant TMS as Template Management
+    participant Cache as Redis Cache
+    participant DocHub as Document Hub
+    participant Vendor as Vendor API<br/>(SmartComm)
+    participant Test as Test Environment
+    participant CaseWiz as CaseWiz
+
+    rect rgb(232, 245, 233)
+        Note over User,Cache: STEP 1: Basic Info (with Auto-Save)
+        User->>Wizard: Enter template name, category, LOB
+        Wizard->>+BFF: POST /drafts (auto-save)
+        BFF->>+Cache: Store draft {sessionId, step1Data}
+        Cache-->>-BFF: OK
+        BFF-->>-Wizard: {draftId}
+        Note right of Cache: Draft persisted - safe if browser closes
+    end
+
+    rect rgb(227, 242, 253)
+        Note over User,TMS: STEP 4: APIs + Vendor Selection (Enhanced)
+        User->>Wizard: Select source API
+        Wizard->>+BFF: GET /apis/validate?endpoint=/credit-info
+        BFF->>+TMS: Validate API availability
+        TMS-->>-BFF: {status: "healthy", fields: [...]}
+        BFF-->>-Wizard: API validated
+
+        User->>Wizard: Select vendor (SmartComm)
+        Wizard->>+BFF: POST /vendors/validate
+        BFF->>+Vendor: GET /templates/available
+        Vendor-->>-BFF: {templates: [...]}
+        BFF-->>-Wizard: Vendor templates available
+
+        Note right of Wizard: Vendor mapping auto-created with template
+    end
+
+    rect rgb(255, 243, 224)
+        Note over User,Test: STEP 6: Preview & Test (New)
+        User->>Wizard: Click "Preview Document"
+        Wizard->>+BFF: POST /templates/preview
+        BFF->>+Vendor: POST /render {templateConfig, sampleData}
+        Vendor-->>-BFF: {previewPdf}
+        BFF-->>-Wizard: Display preview
+        Wizard->>User: Show document preview
+
+        User->>Wizard: Click "Run Test"
+        Wizard->>+BFF: POST /templates/dry-run
+        BFF->>+Test: Execute with test data
+        Test->>Test: Validate eligibility rules
+        Test->>Test: Test API calls
+        Test->>Test: Generate test document
+        Test-->>-BFF: {testResults: "PASSED", issues: []}
+        BFF-->>-Wizard: Test results
+        Wizard->>User: "All tests passed ✓"
+    end
+
+    rect rgb(243, 229, 245)
+        Note over User,CaseWiz: SUBMIT WITH CONFIDENCE
+        User->>Wizard: Click "Submit for Approval"
+        Wizard->>+BFF: POST /templates/submit
+        BFF->>BFF: Convert draft to template
+        BFF->>+TMS: POST /templates {config, vendorMappings}
+        TMS->>+DocHub: Create resource + vendor mappings
+        DocHub-->>-TMS: Created
+        TMS-->>-BFF: {templateId}
+        BFF->>+CaseWiz: Create approval case
+        CaseWiz-->>-BFF: {caseId}
+        BFF-->>-Wizard: Submitted
+        Wizard->>User: "Template submitted with test results attached"
+    end
+```
+
+### Key Enhancements Explained
+
+#### 1. Auto-Save with Redis Cache
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM: User loses work if browser closes                     │
+│  SOLUTION: Auto-save draft to Redis after each step             │
+│                                                                 │
+│  User → Wizard → BFF → Redis Cache                              │
+│                   │                                             │
+│                   └── Key: "draft:{userId}:{sessionId}"         │
+│                       TTL: 24 hours                             │
+│                       Value: {step1: {...}, step2: {...}, ...}  │
+│                                                                 │
+│  On return: Wizard loads draft from cache automatically         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 2. Real-Time Validation
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM: Errors discovered only at end                         │
+│  SOLUTION: Validate at each step                                │
+│                                                                 │
+│  Step 1: Validate template_type uniqueness                      │
+│  Step 3: Validate field names against schema                    │
+│  Step 4: Validate API endpoint is reachable                     │
+│  Step 5: Validate rule syntax                                   │
+│                                                                 │
+│  Benefits:                                                      │
+│  ✓ Immediate feedback                                           │
+│  ✓ Cannot proceed with invalid data                             │
+│  ✓ Better user experience                                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 3. Integrated Vendor Mapping (Step 4 Enhancement)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM: Vendor mapping is separate flow after template        │
+│  SOLUTION: Include vendor selection in wizard Step 4            │
+│                                                                 │
+│  Step 4 (Enhanced):                                             │
+│  ├── Source API Configuration (existing)                        │
+│  └── Vendor Configuration (new)                                 │
+│      ├── Select Generation Vendor (SmartComm/Assentis)          │
+│      ├── Map to vendor template key                             │
+│      ├── Select Print Vendor (LPS) if needed                    │
+│      └── Configure failover priority                            │
+│                                                                 │
+│  Result: Template + Vendor Mappings created together            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4. Preview & Dry-Run Testing (Step 6 Enhancement)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM: No way to verify template before approval             │
+│  SOLUTION: Add preview and testing capabilities                 │
+│                                                                 │
+│  Step 6 (Enhanced):                                             │
+│  ├── Review Configuration (existing)                            │
+│  ├── Document Preview (new)                                     │
+│  │   └── Render sample document with test data                  │
+│  ├── Dry-Run Test (new)                                         │
+│  │   ├── Test eligibility rules                                 │
+│  │   ├── Test API connectivity                                  │
+│  │   ├── Test vendor integration                                │
+│  │   └── Generate test report                                   │
+│  └── Submit with test results attached                          │
+│                                                                 │
+│  Benefits:                                                      │
+│  ✓ Creator sees actual output before submit                     │
+│  ✓ Approver sees test results                                   │
+│  ✓ Fewer rejections due to technical issues                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 5. Approval with Test Results
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM: Approver doesn't know if template works               │
+│  SOLUTION: Attach test results to approval case                 │
+│                                                                 │
+│  Approval Case includes:                                        │
+│  ├── Template configuration                                     │
+│  ├── Document preview (PDF)                                     │
+│  ├── Test results                                               │
+│  │   ├── Eligibility rules: PASSED ✓                            │
+│  │   ├── API connectivity: PASSED ✓                             │
+│  │   ├── Vendor integration: PASSED ✓                           │
+│  │   └── Sample document generated: PASSED ✓                    │
+│  └── Creator notes                                              │
+│                                                                 │
+│  Approver can approve with confidence                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Enhanced Data Flow
+
+```mermaid
+flowchart LR
+    subgraph Client["Browser"]
+        Wizard[Template Wizard]
+    end
+
+    subgraph Backend["Backend Services"]
+        BFF[BFF]
+        TMS[Template Management]
+        DocHub[Document Hub]
+        Cache[(Redis Cache)]
+        TestSvc[Test Service]
+    end
+
+    subgraph External["External"]
+        Vendor[Vendor APIs]
+        DCMS[(DCMS)]
+        CaseWiz[CaseWiz/PEGA]
+    end
+
+    Wizard -->|"Auto-save drafts"| BFF
+    BFF -->|"Store drafts"| Cache
+    BFF -->|"Validate"| TMS
+    BFF -->|"Test"| TestSvc
+    TestSvc -->|"Dry-run"| Vendor
+    BFF -->|"Submit"| TMS
+    TMS -->|"Create resource"| DocHub
+    DocHub -->|"Store files"| DCMS
+    BFF -->|"Create case"| CaseWiz
+
+    style Client fill:#e3f2fd
+    style Backend fill:#e8f5e9
+    style External fill:#fff3e0
+```
+
+### API Endpoints for Enhanced Flow
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/drafts` | POST | Auto-save wizard draft |
+| `/drafts/{id}` | GET | Resume draft |
+| `/drafts/{id}` | DELETE | Discard draft |
+| `/apis/validate` | POST | Validate API endpoint |
+| `/vendors/validate` | POST | Validate vendor availability |
+| `/templates/preview` | POST | Generate document preview |
+| `/templates/dry-run` | POST | Run tests without creating |
+| `/templates/submit` | POST | Create template + vendor mappings + case |
+
+---
+
 ## 3. Template Lifecycle States
 
 ```mermaid
