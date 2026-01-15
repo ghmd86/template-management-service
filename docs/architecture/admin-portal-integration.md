@@ -4,6 +4,8 @@
 
 This document illustrates how the Template Admin Portal interacts with the Template Management Service for creating, updating, and disabling templates and their vendor mappings.
 
+**Approval Workflow**: The template approval process is managed by **Pega CaseWiz**, which provides case management, workflow orchestration, and audit trail capabilities.
+
 ---
 
 ## 1. System Context - Admin Portal Integration
@@ -18,6 +20,7 @@ C4Context
     System(portal, "Template Admin Portal", "Web application for template management")
 
     System(tms, "Template Management Service", "REST API for template CRUD operations")
+    System(pega, "Pega CaseWiz", "Workflow orchestration and approval management")
 
     System_Ext(letterApi, "Letter API Service", "Validates templates with vendors")
     System_Ext(printPartner, "Print Partner Service", "Validates print configurations")
@@ -25,8 +28,10 @@ C4Context
     SystemDb(postgres, "PostgreSQL", "Template storage")
 
     Rel(admin, portal, "Creates/updates templates", "Browser")
-    Rel(approver, portal, "Approves templates", "Browser")
+    Rel(approver, pega, "Reviews/approves", "Browser")
     Rel(portal, tms, "API calls", "HTTPS/REST")
+    Rel(portal, pega, "Creates approval case", "HTTPS/REST")
+    Rel(pega, tms, "Updates status on approval", "HTTPS/REST")
     Rel(tms, letterApi, "Validates", "HTTPS")
     Rel(tms, printPartner, "Validates", "HTTPS")
     Rel(tms, postgres, "Persists", "R2DBC")
@@ -44,20 +49,26 @@ flowchart TB
             TemplateList[Template List]
             TemplateForm[Template Form]
             VendorConfig[Vendor Configuration]
-            ApprovalQueue[Approval Queue]
         end
 
         subgraph Services["Frontend Services"]
             AuthService[Auth Service]
             TemplateService[Template Service]
             VendorService[Vendor Service]
-            NotificationService[Notification Service]
+            WorkflowService[Workflow Service]
         end
 
         subgraph State["State Management"]
             Store[Redux/State Store]
             Cache[Local Cache]
         end
+    end
+
+    subgraph PegaCaseWiz["Pega CaseWiz"]
+        CaseManager[Case Manager]
+        ApprovalQueue[Approval Queue]
+        WorkflowEngine[Workflow Engine]
+        AuditLog[Audit Trail]
     end
 
     subgraph API["Template Management Service :8081"]
@@ -72,17 +83,23 @@ flowchart TB
     Dashboard --> TemplateList
     TemplateList --> TemplateForm
     TemplateForm --> VendorConfig
-    ApprovalQueue --> TemplateForm
 
     TemplateService --> TC
     VendorService --> TVC
+    WorkflowService --> CaseManager
     AuthService --> IDP
 
     UI --> Services
     Services --> Store
     Store --> Cache
 
+    CaseManager --> WorkflowEngine
+    WorkflowEngine --> ApprovalQueue
+    WorkflowEngine --> AuditLog
+    WorkflowEngine --> TC
+
     style AdminPortal fill:#e3f2fd
+    style PegaCaseWiz fill:#fff9c4
     style API fill:#c8e6c9
     style Auth fill:#fff3e0
 ```
@@ -376,7 +393,7 @@ sequenceDiagram
 
 ---
 
-## 9. Approval Workflow
+## 9. Approval Workflow with Pega CaseWiz
 
 ```mermaid
 sequenceDiagram
@@ -384,48 +401,197 @@ sequenceDiagram
     participant Admin as Template Admin
     participant Portal as Admin Portal
     participant TMS as Template Management<br/>Service
+    participant Pega as Pega CaseWiz
     participant Approver as Template Approver
-    participant Email as Email Service
     participant DB as PostgreSQL
 
     rect rgb(240, 248, 255)
-        Note over Admin,TMS: Step 1: Submit for Approval
+        Note over Admin,Pega: Step 1: Submit for Approval (Create Case)
         Admin->>Portal: Click "Submit for Approval"
         Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "PENDING_APPROVAL"}
         TMS->>+DB: UPDATE record_status
         DB-->>-TMS: Updated
         TMS-->>-Portal: 200 OK
+
+        Portal->>+Pega: POST /cases<br/>{caseType: "TemplateApproval",<br/>templateId, version, requestor}
+        Pega->>Pega: Create case & assign to approver pool
+        Pega->>Pega: Start SLA timer
+        Pega-->>-Portal: {caseId: "CASE-12345", status: "PENDING"}
     end
 
     rect rgb(255, 248, 240)
-        Note over Portal,Email: Step 2: Notify Approvers
-        Portal->>+Email: Send notification<br/>{to: approvers[], template: "approval_request"}
-        Email-->>-Portal: Sent
+        Note over Pega,Approver: Step 2: Pega Notifies Approvers
+        Pega->>Pega: Evaluate assignment rules
+        Pega->>Approver: Email/In-app notification<br/>"Template pending approval"
     end
 
     rect rgb(240, 255, 240)
-        Note over Approver,TMS: Step 3: Review & Approve
-        Approver->>Portal: Open approval queue
-        Portal->>+TMS: GET /templates?recordStatus=PENDING_APPROVAL
-        TMS-->>-Portal: Pending templates
+        Note over Approver,Pega: Step 3: Review in Pega CaseWiz
+        Approver->>Pega: Open worklist
+        Pega->>Pega: Display case details
+        Approver->>Pega: Click "View Template"
 
-        Approver->>Portal: Select template to review
-        Portal->>+TMS: GET /templates/{id}/versions/{v}?includeVendors=true
-        TMS-->>-Portal: Full template details
+        Pega->>+TMS: GET /templates/{id}/versions/{v}?includeVendors=true
+        TMS-->>-Pega: Full template details
+        Pega->>Approver: Display template for review
 
-        Approver->>Portal: Review and click "Approve"
-        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "APPROVED", activeFlag: true}
-        TMS->>+DB: UPDATE status and active_flag
-        DB-->>-TMS: Updated
-        TMS-->>-Portal: 200 OK
+        Approver->>Pega: Add comments (optional)
+        Approver->>Pega: Click "Approve"
     end
 
     rect rgb(255, 240, 255)
-        Note over Portal,Admin: Step 4: Notify Admin
-        Portal->>+Email: Send notification<br/>{to: admin, template: "approval_complete"}
-        Email-->>-Portal: Sent
-        Portal->>Admin: Template approved and active
+        Note over Pega,DB: Step 4: Pega Updates Template Status
+        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "APPROVED", activeFlag: true,<br/>approvedBy: "approver@company.com"}
+        TMS->>+DB: UPDATE status, active_flag, approved_by
+        DB-->>-TMS: Updated
+        TMS->>TMS: Invalidate cache
+        TMS-->>-Pega: 200 OK
     end
+
+    rect rgb(240, 248, 255)
+        Note over Pega,Admin: Step 5: Case Resolution & Notification
+        Pega->>Pega: Mark case as RESOLVED-APPROVED
+        Pega->>Pega: Record audit trail
+        Pega->>Admin: Notification: "Template approved"
+        Pega->>Portal: Webhook: Case completed
+        Portal->>Portal: Refresh template status
+    end
+```
+
+---
+
+## 9a. Pega CaseWiz - Rejection Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Approver as Template Approver
+    participant Pega as Pega CaseWiz
+    participant TMS as Template Management<br/>Service
+    participant Admin as Template Admin
+    participant DB as PostgreSQL
+
+    Approver->>Pega: Open case from worklist
+    Approver->>Pega: Review template details
+
+    rect rgb(255, 240, 240)
+        Note over Approver,Pega: Rejection with Comments
+        Approver->>Pega: Enter rejection reason<br/>"Missing regulatory fields"
+        Approver->>Pega: Click "Reject"
+    end
+
+    rect rgb(255, 248, 240)
+        Note over Pega,DB: Update Template Status
+        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "REJECTED",<br/>rejectionReason: "Missing regulatory fields"}
+        TMS->>+DB: UPDATE record_status
+        DB-->>-TMS: Updated
+        TMS-->>-Pega: 200 OK
+    end
+
+    rect rgb(240, 255, 240)
+        Note over Pega,Admin: Notify Admin of Rejection
+        Pega->>Pega: Mark case as RESOLVED-REJECTED
+        Pega->>Pega: Store rejection reason in audit
+        Pega->>Admin: Notification with rejection reason
+    end
+
+    rect rgb(240, 248, 255)
+        Note over Admin,TMS: Admin Revises Template
+        Admin->>TMS: View rejection feedback
+        Admin->>TMS: Update template to address issues
+        Admin->>TMS: Resubmit for approval
+        Note over Admin,Pega: New case created in Pega
+    end
+```
+
+---
+
+## 9b. Pega CaseWiz Integration Details
+
+### Case Data Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `caseId` | String | Pega-generated case ID (e.g., CASE-12345) |
+| `caseType` | String | "TemplateApproval" |
+| `templateId` | UUID | Reference to master_template_id |
+| `templateVersion` | Integer | Template version being approved |
+| `templateType` | String | Type of template (e.g., MONTHLY_STATEMENT) |
+| `requestor` | String | Admin who submitted for approval |
+| `assignedTo` | String | Current approver (from pool) |
+| `status` | String | PENDING, IN_REVIEW, APPROVED, REJECTED |
+| `slaDeadline` | DateTime | Auto-escalation deadline |
+| `comments` | List | Approval/rejection comments |
+| `auditTrail` | List | All actions with timestamps |
+
+### Pega API Endpoints
+
+```http
+# Create approval case
+POST /prweb/api/v1/cases
+Content-Type: application/json
+Authorization: Bearer {pega-token}
+
+{
+  "caseTypeID": "DOCMGMT-TemplateApproval",
+  "content": {
+    "templateId": "550e8400-e29b-41d4-a716-446655440000",
+    "templateVersion": 1,
+    "templateType": "MONTHLY_STATEMENT",
+    "lineOfBusiness": "CREDIT_CARD",
+    "displayName": "Monthly Credit Card Statement",
+    "requestor": "admin@company.com",
+    "urgency": "NORMAL"
+  }
+}
+
+# Get case status
+GET /prweb/api/v1/cases/{caseId}
+
+# Webhook callback (Pega → Portal)
+POST /api/v1/webhooks/pega/case-update
+{
+  "caseId": "CASE-12345",
+  "status": "RESOLVED-APPROVED",
+  "templateId": "550e8400-e29b-41d4-a716-446655440000",
+  "approvedBy": "approver@company.com",
+  "approvedAt": "2024-01-15T14:30:00Z"
+}
+```
+
+### Workflow Configuration in Pega
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  PEGA CASEWIZ WORKFLOW                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────┐     ┌──────────┐     ┌───────────┐               │
+│   │  START  │────▶│ PENDING  │────▶│ IN_REVIEW │               │
+│   └─────────┘     └──────────┘     └───────────┘               │
+│                        │                 │                      │
+│                        │            ┌────┴────┐                 │
+│                        │            ▼         ▼                 │
+│                   [SLA Breach]  ┌────────┐ ┌──────────┐         │
+│                        │        │APPROVED│ │ REJECTED │         │
+│                        ▼        └────────┘ └──────────┘         │
+│                   ┌─────────┐       │           │               │
+│                   │ESCALATE │       │           │               │
+│                   └─────────┘       ▼           ▼               │
+│                        │        ┌───────────────────┐           │
+│                        └───────▶│   RESOLVED        │           │
+│                                 └───────────────────┘           │
+│                                                                 │
+│  Assignment Rules:                                              │
+│  • Credit Card templates → CC Approval Team                     │
+│  • Regulatory templates → Compliance Team                       │
+│  • High-value templates → Senior Approvers                      │
+│                                                                 │
+│  SLA Configuration:                                             │
+│  • Normal: 48 hours                                             │
+│  • Urgent: 4 hours                                              │
+│  • Escalation: Manager notification                             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -454,7 +620,7 @@ flowchart TB
         V6[Update Priority Order]
     end
 
-    subgraph Approval["Approval Operations"]
+    subgraph Approval["Approval Operations (via Pega CaseWiz)"]
         direction TB
         A1[Submit for Approval]
         A2[Approve Template]
@@ -469,6 +635,12 @@ flowchart TB
         POST_V[POST /templates/vendors]
         PATCH_V[PATCH /templates/vendors/{id}]
         DELETE_V[DELETE /templates/vendors/{id}]
+    end
+
+    subgraph Pega["Pega CaseWiz API"]
+        POST_CASE[POST /prweb/api/v1/cases]
+        GET_CASE[GET /prweb/api/v1/cases/{id}]
+        PATCH_CASE[PATCH /prweb/api/v1/cases/{id}]
     end
 
     T1 --> POST_T
@@ -486,14 +658,19 @@ flowchart TB
     V6 --> PATCH_V
 
     A1 --> PATCH_T
-    A2 --> PATCH_T
-    A3 --> PATCH_T
-    A4 --> PATCH_T
+    A1 --> POST_CASE
+    A2 --> PATCH_CASE
+    A2 -.-> PATCH_T
+    A3 --> PATCH_CASE
+    A3 -.-> PATCH_T
+    A4 --> PATCH_CASE
+    A4 -.-> PATCH_T
 
     style Templates fill:#bbdefb
     style Vendors fill:#c8e6c9
     style Approval fill:#fff9c4
     style API fill:#f8bbd9
+    style Pega fill:#ffe0b2
 ```
 
 ---
