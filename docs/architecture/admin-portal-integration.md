@@ -313,6 +313,188 @@ flowchart TB
 
 ---
 
+## 2d. Template Wizard to Create Flow Integration
+
+This diagram shows how the Template Wizard (UI) integrates with the backend Template Create flow.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Resource Creator
+    participant Wizard as Template Wizard<br/>(UI)
+    participant BFF as BFF
+    participant TMS as Template Management<br/>Service
+    participant DocHub as Document Hub
+    participant DocHubDB as Document Hub DB
+    participant CaseWiz as CaseWiz
+    participant PEGA as PEGA
+
+    rect rgb(232, 245, 233)
+        Note over User,Wizard: WIZARD STEPS 1-5: Configuration
+        User->>Wizard: Step 1: Enter Basic Info<br/>(name, category, LOB)
+        User->>Wizard: Step 2: Select Ownership<br/>(account/customer/shared)
+        User->>Wizard: Step 3: Define Extractable Fields
+        User->>Wizard: Step 4: Configure Source APIs
+        User->>Wizard: Step 5: Build Access Rules
+    end
+
+    rect rgb(227, 242, 253)
+        Note over User,Wizard: WIZARD STEP 6: Review & Generate
+        Wizard->>Wizard: Generate JSON Configuration
+        Wizard->>User: Display Summary & JSON
+        User->>Wizard: Click "Create Template"
+    end
+
+    rect rgb(255, 243, 224)
+        Note over Wizard,DocHubDB: TEMPLATE CREATE FLOW
+        Wizard->>+BFF: POST /templates<br/>{templateConfig JSON}
+        BFF->>BFF: Validate request
+        BFF->>+TMS: POST /templates<br/>{templateType, lob, config...}
+        TMS->>TMS: Generate UUID
+        TMS->>TMS: Set version = 1
+        TMS->>TMS: Set status = Draft
+        TMS->>+DocHub: POST /resources<br/>{metadata}
+        DocHub->>+DocHubDB: INSERT resource<br/>(status=Draft)
+        DocHubDB-->>-DocHub: Resource created
+        DocHub-->>-TMS: {resourceId}
+        TMS-->>-BFF: {templateId, version: 1, status: Draft}
+        BFF-->>-Wizard: Template created
+        Wizard->>User: Show success<br/>"Template saved as Draft"
+    end
+
+    rect rgb(243, 229, 245)
+        Note over User,PEGA: SUBMIT FOR APPROVAL (Optional)
+        User->>Wizard: Click "Submit for Approval"
+        Wizard->>+BFF: POST /templates/{id}/submit
+        BFF->>+TMS: PATCH /templates/{id}/versions/1<br/>{status: Pending}
+        TMS->>+DocHub: Update resource status
+        DocHub->>DocHubDB: UPDATE status='Pending'
+        DocHub-->>-TMS: Updated
+        TMS-->>-BFF: OK
+
+        BFF->>+CaseWiz: POST /cases<br/>{resourceId, type: ResourceApproval}
+        CaseWiz->>+PEGA: Create assignment
+        PEGA-->>-CaseWiz: Assignment created
+        CaseWiz-->>-BFF: {caseId}
+        BFF-->>-Wizard: Submitted for approval
+        Wizard->>User: "Template submitted for approval"
+    end
+```
+
+### Flow Summary
+
+| Phase | What Happens | Status |
+|-------|--------------|--------|
+| **Wizard Steps 1-5** | User configures template via UI | N/A (client-side) |
+| **Wizard Step 6** | JSON generated, user reviews | N/A (client-side) |
+| **Create Template** | POST to TMS, saved to DB | `Draft` |
+| **Submit for Approval** | Case created in CaseWiz/PEGA | `Pending` |
+| **Approval** | Approver reviews and approves | `Approved` |
+
+### Wizard Output → API Input Mapping
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        TEMPLATE WIZARD OUTPUT                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  {                                                                          │
+│    "template_type": "CREDIT_CARD_STATEMENT",      ← Step 1: Basic Info      │
+│    "template_category": "Statement",              ← Step 1: Basic Info      │
+│    "display_name": "Credit Card Statement",       ← Step 1: Basic Info      │
+│    "line_of_business": "CREDIT_CARD",             ← Step 1: Basic Info      │
+│    "shared_flag": false,                          ← Step 2: Ownership       │
+│    "data_extraction_config": {                    ← Step 3: Fields          │
+│      "fields": [                                                            │
+│        { "name": "statement_date", "type": "DATE", "required": true }       │
+│      ]                                                                      │
+│    },                                                                       │
+│    "template_config": {                                                     │
+│      "eligibility_criteria": [                    ← Step 5: Access Rules    │
+│        {                                                                    │
+│          "field": "membershipTier",                                         │
+│          "operator": "IN",                                                  │
+│          "values": ["PLATINUM", "GOLD"],                                    │
+│          "api_endpoint": "/api/v1/credit-info"    ← Step 4: Source API      │
+│        }                                                                    │
+│      ]                                                                      │
+│    }                                                                        │
+│  }                                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     POST /api/v1/templates                                   │
+│                     Template Management Service                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     master_template_definition                               │
+│                     (Database Record)                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  master_template_id: UUID (auto-generated)                                  │
+│  template_version: 1                                                        │
+│  template_type: "CREDIT_CARD_STATEMENT"                                     │
+│  line_of_business: "CREDIT_CARD"                                            │
+│  display_name: "Credit Card Statement"                                      │
+│  template_category: "Statement"                                             │
+│  shared_document_flag: false                                                │
+│  data_extraction_config: {...}  (JSON)                                      │
+│  template_config: {...}  (JSON)                                             │
+│  record_status: "Draft"                                                     │
+│  active_flag: false                                                         │
+│  created_by: "user@company.com"                                             │
+│  created_timestamp: 2025-01-14T10:30:00                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Complete End-to-End Flow
+
+```mermaid
+flowchart TB
+    subgraph Wizard["Template Wizard (UI)"]
+        W1[Step 1: Basic Info] --> W2[Step 2: Ownership]
+        W2 --> W3[Step 3: Fields]
+        W3 --> W4[Step 4: APIs]
+        W4 --> W5[Step 5: Rules]
+        W5 --> W6[Step 6: Review]
+        W6 --> W7[Generate JSON]
+    end
+
+    subgraph Create["Template Create Flow"]
+        C1[POST /templates] --> C2[Validate]
+        C2 --> C3[Generate UUID]
+        C3 --> C4[Save to DB]
+        C4 --> C5[Status: Draft]
+    end
+
+    subgraph Approval["Approval Flow"]
+        A1[Submit for Approval] --> A2[Create Case in CaseWiz]
+        A2 --> A3[PEGA Assignment]
+        A3 --> A4[Approver Reviews]
+        A4 --> A5{Decision}
+        A5 -->|Approve| A6[Status: Approved]
+        A5 -->|Reject| A7[Status: Draft]
+    end
+
+    subgraph Storage["Data Storage"]
+        S1[(Document Hub DB)]
+        S2[(DCMS Files)]
+    end
+
+    W7 -->|"JSON Config"| C1
+    C5 --> A1
+    A6 --> S1
+    A6 --> S2
+
+    style Wizard fill:#e8f5e9
+    style Create fill:#e3f2fd
+    style Approval fill:#fff3e0
+    style Storage fill:#f3e5f5
+```
+
+---
+
 ## 3. Template Lifecycle States
 
 ```mermaid
