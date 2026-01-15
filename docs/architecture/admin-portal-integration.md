@@ -14,33 +14,49 @@ This document illustrates how the Template Admin Portal interacts with the Templ
 
 ---
 
+## 0. Glossary
+
+| Term | Definition |
+|------|------------|
+| **Resource** | Specification that provides metadata about a resource, points to or holds a data structure, that allows us to manage them efficiently |
+| **Document** | Refers to a file that will be stored on DCMS; there is no significance on the fact that it happens to be a "Template" |
+| **Resource Approver** | Refers to a CTB employee or contractor that has the ability to approve a new template. (We can have a different type of role for each template if needed) |
+
+---
+
 ## 1. System Context - Admin Portal Integration
 
 ```mermaid
 C4Context
     title Template Admin Portal - System Context
 
-    Person(admin, "Template Admin", "Creates and manages document templates")
-    Person(approver, "Template Approver", "Reviews and approves template changes")
+    Person(admin, "Resource Creator", "Creates and manages document templates")
+    Person(approver, "Resource Approver", "CTB employee who reviews and approves templates")
 
-    System(portal, "Template Admin Portal", "Web application for template management")
+    System(portal, "Template Admin Portal (UI)", "Web application for template management")
+    System(bff, "BFF", "Backend for Frontend - API gateway")
 
     System(tms, "Template Management Service", "REST API for template CRUD operations")
     System(pega, "Pega CaseWiz", "Workflow orchestration and approval management")
+    System(docHub, "Document Hub", "Resource metadata storage")
+    System(dcms, "DCMS", "Document Content Management - file storage")
 
-    System_Ext(letterApi, "Letter API Service", "Validates templates with vendors")
-    System_Ext(printPartner, "Print Partner Service", "Validates print configurations")
+    System_Ext(emailSvc, "Email Service", "Approval notifications")
+    System_Ext(mychannel, "Mychannel", "Channel integration")
 
-    SystemDb(postgres, "PostgreSQL", "Template storage")
+    SystemDb(chaseNetDb, "ChaseNet DB", "Enterprise data")
+    SystemDb(docHubDb, "Document Hub DB", "Resource metadata")
 
     Rel(admin, portal, "Creates/updates templates", "Browser")
     Rel(approver, pega, "Reviews/approves", "Browser")
-    Rel(portal, tms, "API calls", "HTTPS/REST")
-    Rel(portal, pega, "Creates approval case", "HTTPS/REST")
+    Rel(portal, bff, "API calls", "HTTPS/REST")
+    Rel(bff, tms, "Template operations", "HTTPS/REST")
+    Rel(bff, pega, "Creates approval case", "HTTPS/REST")
     Rel(pega, tms, "Updates status on approval", "HTTPS/REST")
-    Rel(tms, letterApi, "Validates", "HTTPS")
-    Rel(tms, printPartner, "Validates", "HTTPS")
-    Rel(tms, postgres, "Persists", "R2DBC")
+    Rel(pega, emailSvc, "Sends notifications", "HTTPS")
+    Rel(tms, docHub, "Stores resource metadata", "HTTPS")
+    Rel(docHub, dcms, "Stores template files", "HTTPS")
+    Rel(docHub, docHubDb, "Persists", "R2DBC")
 ```
 
 ---
@@ -49,25 +65,18 @@ C4Context
 
 ```mermaid
 flowchart TB
-    subgraph AdminPortal["Template Admin Portal (Web App)"]
+    subgraph AdminPortal["Template Admin Portal (UI)"]
         subgraph UI["User Interface"]
             Dashboard[Dashboard]
             TemplateList[Template List]
             TemplateForm[Template Form]
             VendorConfig[Vendor Configuration]
         end
+    end
 
-        subgraph Services["Frontend Services"]
-            AuthService[Auth Service]
-            TemplateService[Template Service]
-            VendorService[Vendor Service]
-            WorkflowService[Workflow Service]
-        end
-
-        subgraph State["State Management"]
-            Store[Redux/State Store]
-            Cache[Local Cache]
-        end
+    subgraph BFFLayer["BFF (Backend for Frontend)"]
+        BFF[BFF API Gateway]
+        AuthService[Auth Service]
     end
 
     subgraph PegaCaseWiz["Pega CaseWiz"]
@@ -77,38 +86,91 @@ flowchart TB
         AuditLog[Audit Trail]
     end
 
-    subgraph API["Template Management Service :8081"]
-        TC[Template Controller]
-        TVC[Vendor Controller]
+    subgraph Backend["Backend Services"]
+        subgraph TMS["Template Management Service :8081"]
+            TC[Template Controller]
+            TVC[Vendor Controller]
+        end
+
+        subgraph DocHub["Document Hub"]
+            ResourceAPI[Resource API]
+            DocHubDB[(Document Hub DB)]
+        end
+
+        subgraph DCMS["DCMS"]
+            FileStorage[(File Storage)]
+        end
     end
 
-    subgraph Auth["Identity Provider"]
-        IDP[OAuth2/OIDC]
+    subgraph External["External Services"]
+        EmailSvc[Email Service]
+        Mychannel[Mychannel]
+        ChaseNetDB[(ChaseNet DB)]
     end
 
-    Dashboard --> TemplateList
-    TemplateList --> TemplateForm
-    TemplateForm --> VendorConfig
-
-    TemplateService --> TC
-    VendorService --> TVC
-    WorkflowService --> CaseManager
-    AuthService --> IDP
-
-    UI --> Services
-    Services --> Store
-    Store --> Cache
+    UI --> BFF
+    BFF --> TC
+    BFF --> TVC
+    BFF --> CaseManager
+    AuthService --> ChaseNetDB
 
     CaseManager --> WorkflowEngine
     WorkflowEngine --> ApprovalQueue
     WorkflowEngine --> AuditLog
     WorkflowEngine --> TC
+    WorkflowEngine --> EmailSvc
+
+    TC --> ResourceAPI
+    ResourceAPI --> DocHubDB
+    ResourceAPI --> FileStorage
 
     style AdminPortal fill:#e3f2fd
+    style BFFLayer fill:#fff3e0
     style PegaCaseWiz fill:#fff9c4
-    style API fill:#c8e6c9
-    style Auth fill:#fff3e0
+    style Backend fill:#c8e6c9
+    style External fill:#f8bbd9
 ```
+
+---
+
+## 2a. Data Ownership
+
+```mermaid
+flowchart LR
+    subgraph CaseWiz["CaseWiz DB"]
+        CaseInfo["CASE INFO<br/>─────────────<br/>• Case ID<br/>• Case Status<br/>• Approver Info<br/>• Approval Timestamp<br/>─────────────<br/>We do not need to keep<br/>the whole approval info.<br/>Query CaseWiz to discover<br/>who approved it and when."]
+    end
+
+    subgraph DocHubDB["Document Hub DB"]
+        Resources["RESOURCES Table<br/>─────────────<br/>• Resource ID<br/>• Category<br/>• Line of Business<br/>• Communication Type<br/>• DCMS Folder Reference<br/>• Metadata JSON<br/>─────────────<br/>Contains DCMS 'folder'<br/>where templates are stored"]
+    end
+
+    subgraph DCMSStorage["DCMS"]
+        Files["FILE STORAGE<br/>─────────────<br/>Organized by:<br/>category/<br/>  line_of_business/<br/>    communication_type/<br/>      doc/<br/>─────────────<br/>Example:<br/>STATEMENTS/<br/>  CREDIT_CARD/<br/>    MONTHLY_STATEMENT/<br/>      PROD-2025.01.01/<br/>        EP001-approved.pdf"]
+    end
+
+    subgraph TMS["Template Management Service"]
+        Templates["TEMPLATE METADATA<br/>─────────────<br/>• Template Definition<br/>• Vendor Mappings<br/>• Template Variables<br/>• Eligibility Criteria<br/>─────────────<br/>Note: Template file<br/>reference points to DCMS"]
+    end
+
+    CaseWiz -.->|"Case Status"| TMS
+    TMS -->|"Resource Metadata"| DocHubDB
+    DocHubDB -->|"File Reference"| DCMSStorage
+
+    style CaseWiz fill:#ffecb3
+    style DocHubDB fill:#c8e6c9
+    style DCMSStorage fill:#bbdefb
+    style TMS fill:#f8bbd9
+```
+
+### Data Ownership Summary
+
+| System | Data Owned | Purpose |
+|--------|-----------|---------|
+| **CaseWiz** | Case ID, Status, Approver, Timestamps | Authentic record of approval workflow; query to get approval details |
+| **Document Hub DB** | Resource metadata, DCMS folder reference | JSON record in RESOURCES table with folder location |
+| **DCMS** | Actual template files | Physical file storage organized by `category/lob/comm_type/doc` |
+| **Template Management** | Template definitions, vendor mappings | Business configuration and routing rules |
 
 ---
 
@@ -405,80 +467,82 @@ sequenceDiagram
 
 ## 9. Approval Workflow with Pega CaseWiz
 
+This sequence follows the architecture: **UI → BFF → CaseWiz → PEGA → Template Management → Document Hub → DCMS**
+
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Admin as Template Admin
-    participant Portal as Admin Portal
-    participant TMS as Template Management<br/>Service
-    participant Pega as Pega CaseWiz
-    participant Approver as Template Approver
-    participant DB as PostgreSQL
+    participant UI as UI
+    participant BFF as BFF
+    participant CaseWiz as CaseWiz
+    participant ChaseNetDB as ChaseNet DB
+    participant PEGA as PEGA
+    participant Mychannel as Mychannel
+    participant CCMS as CCMS
+    participant EmailSvc as Email Service
+    participant DocHub as Document Hub
+    participant DocHubDB as Document Hub DB
+    participant DCMS as DCMS
 
     rect rgb(240, 248, 255)
-        Note over Admin,Pega: Step 1: Submit for Approval (Create Case)
-        Admin->>Portal: Click "Submit for Approval"
-        Portal->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Pending"}
-        TMS->>+DB: UPDATE record_status='Pending'
-        DB-->>-TMS: Updated
-        TMS-->>-Portal: 200 OK
-
-        Portal->>+Pega: POST /cases<br/>{caseType: "TemplateApproval",<br/>templateId, version, requestor}
-        Pega->>Pega: Create case & assign to approver pool
-        Pega->>Pega: Start SLA timer
-        Pega-->>-Portal: {caseId: "CASE-12345", status: "Pending"}
+        Note over UI,BFF: Step 1: Resource Creator Submits for Approval
+        UI->>+BFF: POST /resources/approval<br/>{resourceId, version}
+        BFF->>+CaseWiz: Create Case<br/>{HTML/CSS/JS_FILE_ASSET}
+        CaseWiz->>CaseWiz: Validate request
+        CaseWiz->>+ChaseNetDB: Store case details (DOCUMENT ID)
+        ChaseNetDB-->>-CaseWiz: OK
+        CaseWiz-->>-BFF: {caseId, status: "Pending"}
+        BFF-->>-UI: Case created
     end
 
     rect rgb(255, 248, 240)
-        Note over Pega,Approver: Step 2: Pega Notifies Approvers
-        Pega->>Pega: Evaluate assignment rules
-        Pega->>Approver: Email/In-app notification<br/>"Template pending approval"
+        Note over CaseWiz,PEGA: Step 2: PEGA Workflow Initiated
+        CaseWiz->>+PEGA: POST /assignments<br/>{caseId, assignmentRules}
+        PEGA->>PEGA: Evaluate assignment rules
+        PEGA->>PEGA: GET RESOURCE APPROVED RULE<br/>GET RESOURCE RULES
+        PEGA-->>-CaseWiz: Assignment created
     end
 
     rect rgb(240, 255, 240)
-        Note over Approver,Pega: Step 3: Review in Pega CaseWiz
-        Approver->>Pega: Open worklist
-        Pega->>Pega: Display case details
-        Approver->>Pega: Click "View Template"
-
-        Pega->>+TMS: GET /templates/{id}/versions/{v}?includeVendors=true
-        TMS-->>-Pega: Full template details
-        Pega->>Approver: Display template for review
-
-        Approver->>Pega: Add comments (optional)
-        Approver->>Pega: Click "Approve"
+        Note over PEGA,EmailSvc: Step 3: Notify Approvers
+        PEGA->>+EmailSvc: POST /notifications<br/>{to: approvers, template: "approval_request"}
+        EmailSvc-->>-PEGA: Sent
     end
 
     rect rgb(255, 240, 255)
-        Note over Pega,DB: Step 4: Pega Updates Template Status
-        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Approved", activeFlag: true,<br/>approvedBy: "approver@company.com"}
-        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=true, record_status='Approved'
-        DB-->>-TMS: Template updated
-        TMS->>TMS: Invalidate template cache
-        TMS-->>-Pega: 200 OK
-    end
+        Note over PEGA,DocHub: Step 4: Approver Reviews & Approves
+        Note right of PEGA: Resource Approver opens worklist
+        PEGA->>PEGA: Approver reviews case
+        PEGA->>+DocHub: GET /resources/{id}<br/>Retrieve template for review
+        DocHub-->>-PEGA: Resource details
 
-    rect rgb(240, 255, 240)
-        Note over Pega,DB: Step 5: Pega Updates Vendor Mappings
-        Pega->>+TMS: GET /templates/vendors?templateId={id}&templateVersion={v}
-        TMS-->>-Pega: List of vendor mappings
-
-        loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "Approved", activeFlag: true}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='Approved', active_flag=true
-            DB-->>-TMS: Vendor updated
-            TMS->>TMS: Invalidate vendor cache
-            TMS-->>-Pega: 200 OK
-        end
+        Note right of PEGA: Approver clicks "Approve"
+        PEGA->>PEGA: SET APPROVED RULE<br/>Update case status
     end
 
     rect rgb(240, 248, 255)
-        Note over Pega,Admin: Step 6: Case Resolution & Notification
-        Pega->>Pega: Mark case as Resolved-Approved
-        Pega->>Pega: Record audit trail
-        Pega->>Admin: Notification: "Template approved"
-        Pega->>Portal: Webhook: Case completed
-        Portal->>Portal: Refresh template status
+        Note over PEGA,DCMS: Step 5: Store Approved Template
+        PEGA->>+DocHub: POST /resources/{id}/approve<br/>{approvedBy, caseId}
+        DocHub->>+DocHubDB: UPDATE resource<br/>SET status='Approved', active=true
+        DocHubDB-->>-DocHub: Updated
+
+        DocHub->>+DCMS: POST /documents<br/>Store approved template file
+        Note right of DCMS: Path: category/lob/comm_type/doc
+        DCMS-->>-DocHub: {documentId, path}
+
+        DocHub->>+DocHubDB: UPDATE resource<br/>SET dcms_folder_ref=path
+        DocHubDB-->>-DocHub: Updated
+        DocHub-->>-PEGA: 200 OK
+    end
+
+    rect rgb(255, 255, 224)
+        Note over PEGA,UI: Step 6: Case Resolution & Notification
+        PEGA->>+EmailSvc: POST /notifications<br/>{to: requestor, template: "approved"}
+        EmailSvc-->>-PEGA: Sent
+        PEGA->>+CaseWiz: Update case status<br/>{status: "Resolved-Approved"}
+        CaseWiz->>+ChaseNetDB: Store resolution
+        ChaseNetDB-->>-CaseWiz: OK
+        CaseWiz-->>-PEGA: Case closed
     end
 ```
 
@@ -489,56 +553,51 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Approver as Template Approver
-    participant Pega as Pega CaseWiz
-    participant TMS as Template Management<br/>Service
-    participant Admin as Template Admin
-    participant DB as PostgreSQL
+    participant PEGA as PEGA
+    participant CaseWiz as CaseWiz
+    participant ChaseNetDB as ChaseNet DB
+    participant DocHub as Document Hub
+    participant DocHubDB as Document Hub DB
+    participant EmailSvc as Email Service
+    participant UI as UI
 
-    Approver->>Pega: Open case from worklist
-    Approver->>Pega: Review template details
+    Note right of PEGA: Resource Approver opens worklist
+    PEGA->>+DocHub: GET /resources/{id}<br/>Retrieve template for review
+    DocHub-->>-PEGA: Resource details
 
     rect rgb(255, 240, 240)
-        Note over Approver,Pega: Rejection with Comments
-        Approver->>Pega: Enter rejection reason<br/>"Missing regulatory fields"
-        Approver->>Pega: Click "Reject"
+        Note over PEGA,PEGA: Rejection with Comments
+        Note right of PEGA: Approver enters rejection reason
+        PEGA->>PEGA: SET REJECTED RULE<br/>"Missing regulatory fields"
     end
 
     rect rgb(255, 248, 240)
-        Note over Pega,DB: Revert Template to Draft
-        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "Draft", activeFlag: false,<br/>rejectionReason: "Missing regulatory fields"}
-        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false, record_status='Draft'
-        DB-->>-TMS: Template updated
-        TMS->>TMS: Invalidate template cache
-        TMS-->>-Pega: 200 OK
-    end
-
-    rect rgb(255, 240, 255)
-        Note over Pega,DB: Revert Vendor Mappings to Draft
-        Pega->>+TMS: GET /templates/vendors?templateId={id}&templateVersion={v}
-        TMS-->>-Pega: List of vendor mappings
-
-        loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "Draft", activeFlag: false}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='Draft', active_flag=false
-            DB-->>-TMS: Vendor updated
-            TMS-->>-Pega: 200 OK
-        end
+        Note over PEGA,DocHubDB: Revert Resource to Draft
+        PEGA->>+DocHub: POST /resources/{id}/reject<br/>{rejectedBy, reason, caseId}
+        DocHub->>+DocHubDB: UPDATE resource<br/>SET status='Draft', active=false
+        DocHubDB-->>-DocHub: Updated
+        DocHub-->>-PEGA: 200 OK
     end
 
     rect rgb(240, 255, 240)
-        Note over Pega,Admin: Notify Admin of Rejection
-        Pega->>Pega: Mark case as Resolved-Rejected
-        Pega->>Pega: Store rejection reason in audit
-        Pega->>Admin: Notification with rejection reason
+        Note over PEGA,EmailSvc: Notify Creator of Rejection
+        PEGA->>+EmailSvc: POST /notifications<br/>{to: requestor, template: "rejected",<br/>reason: "Missing regulatory fields"}
+        EmailSvc-->>-PEGA: Sent
     end
 
     rect rgb(240, 248, 255)
-        Note over Admin,TMS: Admin Revises Template
-        Admin->>TMS: View rejection feedback
-        Admin->>TMS: Update template to address issues
-        Admin->>TMS: Resubmit for approval
-        Note over Admin,Pega: New case created in Pega
+        Note over PEGA,ChaseNetDB: Case Resolution
+        PEGA->>+CaseWiz: Update case status<br/>{status: "Resolved-Rejected", reason}
+        CaseWiz->>+ChaseNetDB: Store resolution & rejection reason
+        ChaseNetDB-->>-CaseWiz: OK
+        CaseWiz-->>-PEGA: Case closed
+    end
+
+    rect rgb(255, 255, 224)
+        Note over UI,DocHub: Creator Revises & Resubmits
+        UI->>UI: View rejection feedback
+        UI->>DocHub: Update resource to address issues
+        Note over UI,PEGA: New case created for resubmission
     end
 ```
 
@@ -546,30 +605,67 @@ sequenceDiagram
 
 ## 9b. Pega CaseWiz Integration Details
 
-### Case Data Model
+### Case Data Model (Stored in CaseWiz/ChaseNet DB)
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `caseId` | String | Pega-generated case ID (e.g., CASE-12345) |
-| `caseType` | String | "TemplateApproval" |
-| `templateId` | UUID | Reference to master_template_id |
-| `templateVersion` | Integer | Template version being approved |
-| `templateType` | String | Type of template (e.g., MONTHLY_STATEMENT) |
-| `vendorMappings` | List | List of vendor mapping IDs to approve/reject |
-| `requestor` | String | Admin who submitted for approval |
-| `assignedTo` | String | Current approver (from pool) |
-| `status` | String | Draft, Pending, Approved, Archived |
+| `caseType` | String | "ResourceApproval" |
+| `documentId` | String | Reference to resource/document being approved |
+| `resourceType` | String | Type of resource (e.g., TEMPLATE, STATEMENT) |
+| `requestor` | String | Resource creator who submitted for approval |
+| `assignedTo` | String | Current approver (from pool based on rules) |
+| `status` | String | Pending, In Review, Approved, Rejected, Resolved |
 | `slaDeadline` | DateTime | Auto-escalation deadline |
 | `comments` | List | Approval/rejection comments |
-| `auditTrail` | List | All actions with timestamps |
+
+**Note**: CaseWiz contains the authentic record of approval. We do not need to keep the whole approval information in Document Hub - query CaseWiz to discover who approved it and when.
+
+### Resource Data Model (Stored in Document Hub DB)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Resource identifier |
+| `category` | String | e.g., STATEMENTS, DISCLOSURES |
+| `resourceType` | String | e.g., MONTHLY_STATEMENT |
+| `lineOfBusiness` | String | e.g., CREDIT_CARD |
+| `description` | String | Resource description |
+| `docType` | String | e.g., PDF |
+| `languageCode` | String | e.g., EN_US |
+| `createdTimestamp` | DateTime | Creation time |
+| `department` | String | Owning department |
+| `effectiveStart` | Date | Effective start date |
+| `effectiveEnd` | Date | Effective end date |
+| `status` | String | Draft, Pending, Approved, Archived |
+| `caseId` | String | Reference to CaseWiz case |
+| `dcmsFolderRef` | String | DCMS folder path reference |
+
+### DCMS File Storage Structure
+
+```
+category/
+  line_of_business/
+    communication_type/
+      doc/
+        PROD-{date}/
+          {resource_id}-approved.{ext}
+
+Example:
+STATEMENTS/
+  CREDIT_CARD/
+    MONTHLY_STATEMENT/
+      PROD-2025.01.01/
+        EP001-approved.pdf
+        EP001-approved-v2.pdf
+```
 
 ### Approval Impact on Records
 
-| Decision | Template Effect | Vendor Mapping Effect |
-|----------|-----------------|----------------------|
-| **Approve** | `activeFlag=true`, `record_status=Approved` | `activeFlag=true`, `vendor_mapping_status=Approved` |
-| **Reject** | `activeFlag=false`, `record_status=Draft` | `activeFlag=false`, `vendor_mapping_status=Draft` |
-| **Archive** | `activeFlag=false`, `record_status=Archived` | `activeFlag=false`, `vendor_mapping_status=Archived` |
+| Decision | Document Hub Effect | DCMS Effect |
+|----------|---------------------|-------------|
+| **Approve** | `status=Approved`, `activeFlag=true`, `dcmsFolderRef` populated | File stored in approved folder |
+| **Reject** | `status=Draft`, `activeFlag=false` | No file stored |
+| **Archive** | `status=Archived`, `activeFlag=false` | File remains but marked archived |
 
 ### Pega API Endpoints
 
