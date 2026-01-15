@@ -8,7 +8,7 @@ This document illustrates how the Template Admin Portal interacts with the Templ
 
 **Approval Impact**:
 - **Template**: Approval sets `activeFlag=true` (active) or `activeFlag=false` (inactive)
-- **Vendor Mappings**: Approval sets `templateStatus=APPROVED` or `templateStatus=REJECTED` for associated vendor mappings
+- **Vendor Mappings**: Approval sets `vendor_mapping_status=APPROVED` or `vendor_mapping_status=REJECTED` for associated vendor mappings
 
 ---
 
@@ -458,8 +458,8 @@ sequenceDiagram
         TMS-->>-Pega: List of vendor mappings
 
         loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{templateStatus: "APPROVED", activeFlag: true}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET template_status='APPROVED', active_flag=true
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "APPROVED", activeFlag: true}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='APPROVED', active_flag=true
             DB-->>-TMS: Vendor updated
             TMS->>TMS: Invalidate vendor cache
             TMS-->>-Pega: 200 OK
@@ -513,8 +513,8 @@ sequenceDiagram
         TMS-->>-Pega: List of vendor mappings
 
         loop For each vendor mapping
-            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{templateStatus: "REJECTED", activeFlag: false}
-            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET template_status='REJECTED', active_flag=false
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{vendorMappingStatus: "REJECTED", activeFlag: false}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET vendor_mapping_status='REJECTED', active_flag=false
             DB-->>-TMS: Vendor updated
             TMS-->>-Pega: 200 OK
         end
@@ -561,8 +561,8 @@ sequenceDiagram
 
 | Decision | Template Effect | Vendor Mapping Effect |
 |----------|-----------------|----------------------|
-| **APPROVE** | `activeFlag=true`, `recordStatus=APPROVED` | `activeFlag=true`, `templateStatus=APPROVED` |
-| **REJECT** | `activeFlag=false`, `recordStatus=REJECTED` | `activeFlag=false`, `templateStatus=REJECTED` |
+| **APPROVE** | `activeFlag=true`, `recordStatus=APPROVED` | `activeFlag=true`, `vendor_mapping_status=APPROVED` |
+| **REJECT** | `activeFlag=false`, `recordStatus=REJECTED` | `activeFlag=false`, `vendor_mapping_status=REJECTED` |
 
 ### Pega API Endpoints
 
@@ -606,13 +606,13 @@ POST /api/v1/webhooks/pega/case-update
     {
       "vendorId": "660e8400-e29b-41d4-a716-446655440001",
       "vendor": "SmartComm",
-      "templateStatus": "APPROVED",
+      "vendorMappingStatus": "APPROVED",
       "activeFlag": true
     },
     {
       "vendorId": "660e8400-e29b-41d4-a716-446655440002",
       "vendor": "LPS",
-      "templateStatus": "APPROVED",
+      "vendorMappingStatus": "APPROVED",
       "activeFlag": true
     }
   ]
