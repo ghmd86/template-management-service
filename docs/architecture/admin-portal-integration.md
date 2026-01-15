@@ -6,6 +6,10 @@ This document illustrates how the Template Admin Portal interacts with the Templ
 
 **Approval Workflow**: The template approval process is managed by **Pega CaseWiz**, which provides case management, workflow orchestration, and audit trail capabilities.
 
+**Approval Impact**:
+- **Template**: Approval sets `activeFlag=true` (active) or `activeFlag=false` (inactive)
+- **Vendor Mappings**: Approval sets `templateStatus=APPROVED` or `templateStatus=REJECTED` for associated vendor mappings
+
 ---
 
 ## 1. System Context - Admin Portal Integration
@@ -442,14 +446,28 @@ sequenceDiagram
     rect rgb(255, 240, 255)
         Note over Pega,DB: Step 4: Pega Updates Template Status
         Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "APPROVED", activeFlag: true,<br/>approvedBy: "approver@company.com"}
-        TMS->>+DB: UPDATE status, active_flag, approved_by
-        DB-->>-TMS: Updated
-        TMS->>TMS: Invalidate cache
+        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=true, record_status='APPROVED'
+        DB-->>-TMS: Template updated
+        TMS->>TMS: Invalidate template cache
         TMS-->>-Pega: 200 OK
     end
 
+    rect rgb(240, 255, 240)
+        Note over Pega,DB: Step 5: Pega Updates Vendor Mappings
+        Pega->>+TMS: GET /templates/vendors?templateId={id}&templateVersion={v}
+        TMS-->>-Pega: List of vendor mappings
+
+        loop For each vendor mapping
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{templateStatus: "APPROVED", activeFlag: true}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET template_status='APPROVED', active_flag=true
+            DB-->>-TMS: Vendor updated
+            TMS->>TMS: Invalidate vendor cache
+            TMS-->>-Pega: 200 OK
+        end
+    end
+
     rect rgb(240, 248, 255)
-        Note over Pega,Admin: Step 5: Case Resolution & Notification
+        Note over Pega,Admin: Step 6: Case Resolution & Notification
         Pega->>Pega: Mark case as RESOLVED-APPROVED
         Pega->>Pega: Record audit trail
         Pega->>Admin: Notification: "Template approved"
@@ -481,11 +499,25 @@ sequenceDiagram
     end
 
     rect rgb(255, 248, 240)
-        Note over Pega,DB: Update Template Status
-        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "REJECTED",<br/>rejectionReason: "Missing regulatory fields"}
-        TMS->>+DB: UPDATE record_status
-        DB-->>-TMS: Updated
+        Note over Pega,DB: Update Template Status (Inactive)
+        Pega->>+TMS: PATCH /templates/{id}/versions/{v}<br/>{recordStatus: "REJECTED", activeFlag: false,<br/>rejectionReason: "Missing regulatory fields"}
+        TMS->>+DB: UPDATE master_template_definition<br/>SET active_flag=false, record_status='REJECTED'
+        DB-->>-TMS: Template updated
+        TMS->>TMS: Invalidate template cache
         TMS-->>-Pega: 200 OK
+    end
+
+    rect rgb(255, 240, 255)
+        Note over Pega,DB: Update Vendor Mappings (Rejected)
+        Pega->>+TMS: GET /templates/vendors?templateId={id}&templateVersion={v}
+        TMS-->>-Pega: List of vendor mappings
+
+        loop For each vendor mapping
+            Pega->>+TMS: PATCH /templates/vendors/{vendorId}<br/>{templateStatus: "REJECTED", activeFlag: false}
+            TMS->>+DB: UPDATE template_vendor_mapping<br/>SET template_status='REJECTED', active_flag=false
+            DB-->>-TMS: Vendor updated
+            TMS-->>-Pega: 200 OK
+        end
     end
 
     rect rgb(240, 255, 240)
@@ -517,12 +549,20 @@ sequenceDiagram
 | `templateId` | UUID | Reference to master_template_id |
 | `templateVersion` | Integer | Template version being approved |
 | `templateType` | String | Type of template (e.g., MONTHLY_STATEMENT) |
+| `vendorMappings` | List | List of vendor mapping IDs to approve/reject |
 | `requestor` | String | Admin who submitted for approval |
 | `assignedTo` | String | Current approver (from pool) |
 | `status` | String | PENDING, IN_REVIEW, APPROVED, REJECTED |
 | `slaDeadline` | DateTime | Auto-escalation deadline |
 | `comments` | List | Approval/rejection comments |
 | `auditTrail` | List | All actions with timestamps |
+
+### Approval Impact on Records
+
+| Decision | Template Effect | Vendor Mapping Effect |
+|----------|-----------------|----------------------|
+| **APPROVE** | `activeFlag=true`, `recordStatus=APPROVED` | `activeFlag=true`, `templateStatus=APPROVED` |
+| **REJECT** | `activeFlag=false`, `recordStatus=REJECTED` | `activeFlag=false`, `templateStatus=REJECTED` |
 
 ### Pega API Endpoints
 
@@ -554,8 +594,28 @@ POST /api/v1/webhooks/pega/case-update
   "caseId": "CASE-12345",
   "status": "RESOLVED-APPROVED",
   "templateId": "550e8400-e29b-41d4-a716-446655440000",
+  "templateVersion": 1,
+  "decision": "APPROVED",
   "approvedBy": "approver@company.com",
-  "approvedAt": "2024-01-15T14:30:00Z"
+  "approvedAt": "2024-01-15T14:30:00Z",
+  "templateUpdate": {
+    "activeFlag": true,
+    "recordStatus": "APPROVED"
+  },
+  "vendorMappingsUpdated": [
+    {
+      "vendorId": "660e8400-e29b-41d4-a716-446655440001",
+      "vendor": "SmartComm",
+      "templateStatus": "APPROVED",
+      "activeFlag": true
+    },
+    {
+      "vendorId": "660e8400-e29b-41d4-a716-446655440002",
+      "vendor": "LPS",
+      "templateStatus": "APPROVED",
+      "activeFlag": true
+    }
+  ]
 }
 ```
 
